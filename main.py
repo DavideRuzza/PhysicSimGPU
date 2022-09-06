@@ -12,7 +12,7 @@ import numpy as np
 class Window(OrbitCamera):
 
     title = "Test"
-    window_size = (900, 500)
+    window_size = (1024, 512)
     gl_version = (4, 6, 0)
     aspect_ratio = window_size[0]/window_size[1]
     resource_dir='resources/'
@@ -55,23 +55,25 @@ class Window(OrbitCamera):
         self.bunny = BouyantRigidBody(self.ctx, "scenes/bunny.obj")
         self.bunny.load_surface(self.surf_prog, self.ocean, self.surf_tex, 
                                 self.norm_tex, self.choppy, self.wave_scale, self.surf_size)
-        self.wnd.fbo.use()
+
+        # self.bunny.calc_mass_prop(True)
+
     def render(self, t, dt):
         
-
-        # self.bunny.apply_force([0,0,-0.1], [1, 0, 0])
-        # self.bunny.apply_force([0,0,0.1], [-1, 0, 0])
-        # self.bunny.apply_force([0,0,10], [0, 0, 0])
-        # print(self.bunny.pos)
-        # self.bunny.integrate(dt)
-        # self.bunny.calc_mass_prop()
+        # self.bunny.apply_force([1, 0, 0])
+        self.bunny.apply_momentum([0.1, 0, 0.1])
+        self.bunny.integrate(dt)
+        self.bunny.calc_mass_prop(True)
 
         self.wnd.fbo.use()
         self.ctx.clear(*[0.2]*3)
-        self.wnd.fbo.viewport = 0, 0, 128*self.bunny.n_layer, 128
+        # self.bunny.render_surf(self.proj_mat, self.view)
+        self.wnd.fbo.viewport = 0, 128, 128*self.bunny.n_layer, 128
         self.bunny.peel_tex.use(0)
         self.quad.render(self.debug_prog)
-        
-        
+
+        self.wnd.fbo.viewport = 0, 0, 128*self.bunny.n_layer, 128
+        self.bunny.copy_tex.use(0)
+        self.quad.render(self.debug_prog)
 
 Window.run()
