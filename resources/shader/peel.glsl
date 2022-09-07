@@ -9,7 +9,6 @@ uniform float out_lay; // output layer
 uniform float in_lay; // input layer
 uniform float n_lay; // tot num of layers
 
-uniform float water_surf;
 uniform float dx;
 uniform float dy;
 
@@ -57,9 +56,12 @@ void main(){
 
     fragOut = vec4(N, 1.0);
     float c = sign(N.z) * pos.z;
-    fragOut1 = vec4(c*pos, c) *dx*dy; // (rx, ry, rz, V)
-    fragOut2 = pos.x * vec4(c*pos, 0.0) *dx*dy; // (Ixx, Ixy, Ixz, .)
-    fragOut3 = c * vec4(pos.y*pos.y, pos.y*pos.z, pos.z*pos.z, 0.0) *dx*dy; // (Iyy, Iyz, Izz, .)
+     // (rx, ry, rz, V)
+    fragOut1 = vec4(c*pos, c) *dx*dy;
+     // (Ixx, Ixy, Ixz, .)
+    fragOut2 = pos.x * vec4(c*pos/vec3(1., 1., 2.), 0.0) *dx*dy;
+     // (Iyy, Iyz, Izz, .)
+    fragOut3 = c * vec4(pos.y*pos.y, pos.y*pos.z/2., pos.z*pos.z/3., 0.0) *dx*dy;
     
     
 }

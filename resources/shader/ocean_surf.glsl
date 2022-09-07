@@ -69,18 +69,17 @@ void main(){
         vec3 peel_norm = texture(norm_peel, UV).xyz;
         float peel_depth = texture(depth, UV).r;
         // fragColor = vec4(peel_norm, 0.0);
-        if (peel_norm.z > 0. || peel_depth>0.999){
+        if (peel_norm.z > 0. || peel_depth > 0.999){
             discard;
         }
-        fragColor = vec4(N, 1.0);
-    } else {
-        fragColor = vec4(N, 1.0);
-    }
 
+    }
+    fragColor = vec4(N, 1.0);
     float c = sign(N.z) * pos.z;
     fragOut1 = vec4(c*pos, c) *dx*dy; // (rx, ry, rz, V)
-    fragOut2 = pos.x * vec4(c*pos, 0.0) *dx*dy; // (Ixx, Ixy, Ixz, .)
-    fragOut3 = c * vec4(pos.y*pos.y, pos.y*pos.z, pos.z*pos.z, 0.0) *dx*dy; // (Iyy, Iyz, Izz, .)
+    fragOut2 = pos.x * vec4(c*pos/vec3(1., 1., 2.), 0.0) *dx*dy; // (Ixx, Ixy, Ixz, .)
+    fragOut3 = c * vec4(pos.y*pos.y, pos.y*pos.z/2., pos.z*pos.z/3., 0.0) *dx*dy; // (Iyy, Iyz, Izz, .)
+
 
 
 }

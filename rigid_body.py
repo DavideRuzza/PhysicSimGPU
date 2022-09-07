@@ -1,4 +1,3 @@
-from importlib.metadata import SelectableGroups
 import moderngl as mgl
 from moderngl_window import resources
 from moderngl_window.scene import Scene
@@ -9,6 +8,9 @@ from moderngl_window.geometry import quad_fs, quad_2d
 from pyrr import Matrix33 as m33
 from pyrr import Matrix44 as m44
 import numpy as np
+from struct import unpack
+
+
 
 def load_scene(
     path: str, cache=False, attr_names=AttributeNames, kind=None, **kwargs
@@ -27,6 +29,14 @@ def load_program(path=None) -> mgl.Program:
             path=path,
         )
     )
+
+def load_compute_shader(
+        path, defines: dict = None, **kwargs
+    ) -> mgl.ComputeShader:
+
+        return resources.programs.load(
+            ProgramDescription(compute_shader=path, defines=defines, **kwargs)
+        )
 
 def set_uniform(program:mgl.Program, uniforms: list):
     """ [to_value, to_write]"""
@@ -47,6 +57,7 @@ def set_uniform(program:mgl.Program, uniforms: list):
             program[val].write(to_write[val])
         except:
             pass
+
 
 class RigidBody():
 
@@ -69,14 +80,22 @@ class RigidBody():
         self.next_ang_acc = np.zeros(3, dtype='f4')
     
         # mass props
-        self.inertia_world = m33.identity('f4')
-        R = self.gen_rot_mat33()
-        self.inertia_local = np.abs(R@self.inertia_world@R.T)
         self.rho = rho
         self.vol = 1
         self.mass = self.vol*self.rho
 
-        # print(self.inertia_world, self.inertia_local)
+        self.inertia_world = self.rho*m33.identity('f4')
+        self.inertia_local = self.inertia_world
+
+        # center of mass
+        self.com = np.zeros(3, dtype='f4')
+
+
+    def gen_local_inertia(self):
+        # doesn't work
+        R = self.gen_rot_mat33()
+        self.inertia_local = R@self.inertia_world@R.T
+        # self.inertia_local = self.inertia_world
 
     def _cross(self, a, b):
         c = [a[1]*b[2] - a[2]*b[1],
@@ -98,21 +117,29 @@ class RigidBody():
         '''
         self.next_lin_acc += np.array(F, dtype='f4')/self.mass
 
-        r = self.pos-app_pt # arm of the force
+        r = -self.com+app_pt # arm of the force
         torque = -self._cross(r, F)
-        self.next_ang_acc += np.array(np.linalg.inv(self.inertia_local) @ torque)
+        
+        self.next_ang_acc += np.array(np.linalg.inv(self.inertia_world) @ torque)
 
-        # print(self.next_ang_acc, self.next_lin_acc)
     
-    def integrate(self, dt):
+    def integrate(self, dt, drag = True):
         ''' Integrate motion after applying all forces using Verlet algorithm
             # HELP: https://physics.stackexchange.com/questions/688426/compute-angular-acceleration-from-torque-in-3d
         '''
+        if drag:
+            # calc angular drag
+            torque_drag = -0.3*self.ang_vel - 0.6*self.ang_vel*np.linalg.norm(self.ang_vel)
+            self.next_ang_acc += np.array(np.linalg.inv(self.inertia_world) @ torque_drag)
+            # linear drag
+            Fd = -self.lin_vel*np.abs(self.lin_vel) - 0.6*self.lin_vel
+            self.next_lin_acc += np.array(Fd, dtype='f4')/self.mass
 
         # Angular Motion
         self.ang = self.ang + self.ang_vel*dt + self.ang_acc*(dt*dt*0.5)
         self.ang_vel = self.ang_vel + (self.ang_acc+self.next_ang_acc)*(dt*0.5)
         self.ang_acc = self.next_ang_acc
+        
         
         # Linear Motion
         self.pos = self.pos + self.lin_vel*dt + self.lin_acc*(dt*dt*0.5)
@@ -126,7 +153,7 @@ class RigidBody():
         self.rot_mat = self.gen_rot_mat44()
         self.trans_mat = self.gen_trans_matrix()
         self.model_mat = self.gen_model_matrix()
-        
+        self.gen_local_inertia()
 
     def gen_rot_mat33(self):
         xrot, yrot, zrot = self.ang
@@ -141,7 +168,6 @@ class RigidBody():
 
     def gen_model_matrix(self):
         return (self.trans_mat*self.rot_mat).astype('f4')
-
 
 
 class BouyantRigidBody(RigidBody):
@@ -161,14 +187,20 @@ class BouyantRigidBody(RigidBody):
         self.surf_ch = None # choppyness
         self.surf_size = None
 
+        # --------------
+        self.im_vol = 0
+        self.im_com = np.zeros(3, dtype='f4')
+        self.rho=rho
         # ---------------
 
         self.x_bound = [-1.5, 1.5]
         self.y_bound = [-1.5, 1.5]
         self.orto_proj:m44 = m44.orthogonal_projection(*self.x_bound, *self.y_bound, -3, 3)
         
-        self.N = 128
+        self.N =128
         self.log2N = int(np.log2(self.N))
+        gs = 16 # group size
+        self.nxyz = [int(self.N/gs), int(self.N/gs), 1]
         
         self.dx = np.abs(self.x_bound[0]-self.x_bound[1])/self.N
         self.dy = np.abs(self.y_bound[0]-self.y_bound[1])/self.N
@@ -192,7 +224,6 @@ class BouyantRigidBody(RigidBody):
 
         self.peel_prog = load_program("shader/peel.glsl")
         
-        
         #---------------------- COPY FRAMEBUFFER
         self.copy_tex = self.ctx.texture((self.N*self.n_layer, self.N), components=4, dtype='f4')
         self.copy_tex.filter = mgl.NEAREST, mgl.NEAREST
@@ -200,16 +231,80 @@ class BouyantRigidBody(RigidBody):
         self.copy_fb.clear()
 
         self.copy_prog = load_program("shader/copy.glsl")
-
-        self.ctx.enable(mgl.DEPTH_TEST)
         
+        # ------------------ INTEGRATION TEST
+        self.gen_sum_texture_array()
+        self.integ_tex = self.ctx.texture((self.N, self.N), components=4, dtype='f4')
+        self.integ_tex.filter = mgl.NEAREST, mgl.NEAREST
+        self.integration_comp = load_compute_shader("compute/integral_reduce.comp")
+        self.sum_comp = load_compute_shader("compute/add_layer.comp")
         # ---------
         self.quad = quad_fs()
         self.plane = quad_2d((5, 5))
 
-        # self.calc_mass_prop(False)
+        self.calc_mass_prop(False) # calculate total mass prop
 
-    def peel(self, lay):
+
+    def update_bouyancy(self, dt):
+        g = 9.81
+        rhoL = 1.0
+
+        self.calc_mass_prop()
+        m = self.vol*self.rho
+        Fm = [0, 0, -g*m]
+        Fb = [0, 0, rhoL*self.im_vol*g]
+
+        self.apply_force(Fm, self.com)
+
+        if self.im_vol > 0.: 
+            self.apply_force(Fb, self.im_com)
+
+        self.integrate(dt, self.im_vol>0.)
+
+    ###### ------------     FUNCTION DEFINITION
+    def gen_sum_texture_array(self):
+        self.sum_tex_arr=[]
+        
+        for i in range(self.log2N):
+            tex = self.ctx.texture(
+            (
+                int(self.N/np.power(2, i+1)),
+                int(self.N/np.power(2, i+1))
+            ), 4, dtype='f4')
+            tex.filter = mgl.NEAREST, mgl.NEAREST
+            tex.repeat_x = False
+            tex.repeat_y = False
+            self.sum_tex_arr.append(tex)
+
+
+    def find_sum(self, texIn: mgl.Texture):
+        # find integral of texture summ all values
+        iters = self.log2N
+
+        for i in range(iters):
+            if i == 0:
+                texIn.bind_to_image(0)
+                self.sum_tex_arr[0].bind_to_image(1)
+            else:
+                self.sum_tex_arr[i-1].bind_to_image(0)
+                self.sum_tex_arr[i].bind_to_image(1)
+
+            gs = int(self.N/np.power(2, i+1))
+            self.integration_comp.run(gs, gs, 1)
+        return self.sum_tex_arr[-1].read()
+
+
+    def sum_and_integrate(self, tex:mgl.Texture):
+        tex.bind_to_image(0)
+        self.integ_tex.bind_to_image(1)
+        self.sum_comp['nlayers'].value = self.n_layer
+        self.sum_comp.run(*self.nxyz)
+
+        self.integrated = self.find_sum(self.integ_tex)
+        integral = np.array(unpack('ffff', self.integrated), dtype='f4')
+        return integral
+    
+    def copy_depth(self):
         # Copy depth texture
         self.copy_fb.clear()
         self.copy_fb.use()
@@ -217,6 +312,9 @@ class BouyantRigidBody(RigidBody):
         self.depth_tex.use(0)
         self.quad.render(self.copy_prog)
         self.depth_tex.compare_func='<'
+
+    def peel(self, lay):
+        self.copy_depth()
 
         # peel away current layer
         self.fb.use()
@@ -226,7 +324,7 @@ class BouyantRigidBody(RigidBody):
         self.peel_tex.use(1)
         self.vao.render(self.peel_prog)
 
-    def calc_mass_prop(self, surf=True):
+    def calc_mass_prop(self, intersect=True):
 
         self.ctx.disable(mgl.CULL_FACE)
         self.ctx.enable(mgl.DEPTH_TEST)
@@ -239,13 +337,14 @@ class BouyantRigidBody(RigidBody):
         self.copy_fb.clear()
         self.fb.clear()
 
-
         self.peel_prog['proj'].write(self.orto_proj.astype('f4'))
         self.peel_prog['view'].write(view_mat.astype('f4'))
         self.peel_prog['model'].write(self.model_mat.astype('f4'))
         self.peel_prog['size'].value = self.N
+        self.peel_prog['dx'].value = self.dx
+        self.peel_prog['dy'].value = self.dy
 
-        if surf: # first layer is water surface
+        if intersect: # first layer is water surface
             self.fb.use()
             self.fb.viewport = 0, 0, self.N, self.N
             self.render_surf(self.orto_proj, view_mat)
@@ -260,15 +359,10 @@ class BouyantRigidBody(RigidBody):
         for i in range(self.n_layer-2):
             self.peel(i+2)
 
-        if surf: # calc surface intersection
-            self.copy_fb.clear()
-            self.copy_fb.use()
-            self.depth_tex.compare_func=''
-            self.depth_tex.use(0)
-            self.quad.render(self.copy_prog)
-            self.depth_tex.compare_func='<'
+        if intersect: # calc surface intersection
+            self.copy_depth()
 
-            self.fb.viewport = (0, 0, self.N, self.N)
+            self.fb.viewport = (0, 0, self.N, self.N) # cear only first layer
             self.fb.scissor = (0, 0, self.N, self.N)
 
             self.fb.use()
@@ -278,6 +372,23 @@ class BouyantRigidBody(RigidBody):
             self.fb.scissor = self.scissor
             self.fb.viewport = self.viewport
 
+        mass_prop1 = self.sum_and_integrate(self.mass_tex0)
+        mass_prop1[0]/=mass_prop1[3]
+        mass_prop1[1]/=mass_prop1[3]
+        mass_prop1[2]/=2.*mass_prop1[3]
+
+        if intersect:
+            *self.im_com, self.im_vol = mass_prop1
+            self.im_com = np.array(self.im_com)
+        else:
+            *self.com, self.vol = mass_prop1
+            self.com = np.array(self.com)
+            Ixx, Ixy, Ixz, _ = self.sum_and_integrate(self.mass_tex1)
+            Iyy, Iyz, Izz, _ = self.sum_and_integrate(self.mass_tex2)
+            self.mass = self.rho*self.vol
+
+            self.inertia_world = self.rho*m33([[Ixx, -Ixy, -Ixz], [-Ixy, Iyy, -Iyz], [-Ixz, -Iyz, Izz]], dtype='f4')
+            self.gen_local_inertia()
 
     def load_surface(self, surf_prog, surf_vao, surf_tex, surf_norm, choppy, wavescale, surf_size):
         self.surf_prog = surf_prog
